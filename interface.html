@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deep Learning Road Segmentation</title>
+    <!-- 1. Load Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Center the video/canvas elements */
+        .video-container {
+            position: relative;
+            width: 640px;
+            height: 480px;
+            margin: 0 auto;
+            border-radius: 0.5rem;
+            overflow: hidden;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
+        /* Stack canvas on top of video */
+        #video, #canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        #canvas {
+            /* Make canvas background transparent to see video underneath */
+            background-color: transparent;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-900 min-h-screen flex items-center justify-center p-4">
+
+    <div class="max-w-3xl w-full bg-white p-6 md:p-8 rounded-lg shadow-xl text-center">
+        <h1 class="text-3xl font-bold text-gray-800 mb-2">Deep Learning Road Segmentation</h1>
+        <p class="text-gray-600 mb-6">Using TensorFlow.js and a pre-trained DeepLabv3 model to identify road pixels from your webcam in real-time.</p>
+
+        <!-- Video and Canvas Container -->
+        <div class="video-container bg-gray-900">
+            <!-- Hidden video element to stream webcam -->
+            <video id="video" playsinline muted autoplay></video>
+            <!-- Visible canvas to draw video + segmentation mask -->
+            <canvas id="canvas"></canvas>
+        </div>
+
+        <!-- Controls and Status -->
+        <div class="mt-6">
+            <button id="startButton" class="bg-blue-600 text-white font-semibold py-3 px-6 rounded-lg shadow-md hover:bg-blue-700 transition-colors duration-200">
+                Start Webcam
+            </button>
+            <p id="status" class="text-gray-500 mt-4">Loading Model...</p>
+        </div>
+    </div>
+
+    <!-- 2. Load TensorFlow.js and the DeepLab model -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.11.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/deeplab@0.2.2/dist/deeplab.min.js"></script>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const startButton = document.getElementById('startButton');
+        const statusText = document.getElementById('status');
+
+        let model = null;
+        let isWebcamStarted = false;
+
+        // --- Model and Webcam Logic ---
+
+        // 1. Load the DeepLab model trained on Cityscapes
+        // This model is optimized for urban scenes and can identify "road"
+        async function loadModel() {
+            statusText.innerText = "Loading DeepLabv3 (Cityscapes) model...";
+            try {
+                // We use 'cityscapes' because it's trained to recognize roads (class 0)
+                model = await deeplab.load({ base: 'cityscapes', quantizationBytes: 2 });
+                statusText.innerText = "Model loaded. Click 'Start Webcam'!";
+                startButton.disabled = false;
+                startButton.classList.remove('opacity-50', 'cursor-not-allowed');
+            } catch (e) {
+                console.error("Error loading model: ", e);
+                statusText.innerText = "Error: Could not load model. Check console.";
+            }
+        }
+
+        // 2. Set up the webcam feed
+        async function setupWebcam() {
+            if (isWebcamStarted) return;
+            
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: 640, height: 480 },
+                    audio: false
+                });
+                video.srcObject = stream;
+                await new Promise((resolve) => {
+                    video.onloadedmetadata = () => {
+                        video.play();
+                        canvas.width = video.videoWidth;
+                        canvas.height = video.videoHeight;
+                        isWebcamStarted = true;
+                        resolve();
+                    };
+                });
+            } catch (e) {
+                console.error("Error accessing webcam: ", e);
+                statusText.innerText = "Error: Could not access webcam.";
+            }
+        }
+
+        // 3. Run segmentation on each frame
+        async function runSegmentation() {
+            if (!model || !isWebcamStarted) {
+                // Wait until both are ready
+                requestAnimationFrame(runSegmentation);
+                return;
+            }
+            
+            // Run the model
+            const { segmentationMap, legend } = await model.segment(video);
+
+            // --- Visualization ---
+            // segmentationMap is a 2D array (width x height) where each
+            // value is the class ID. For Cityscapes, "road" is class 0.
+            
+            // Create a color map. We'll make "road" (class 0) translucent green
+            // and everything else transparent.
+            const roadColor = [0, 255, 0, 100]; // R, G, B, Alpha (0-255)
+            const otherColor = [0, 0, 0, 0];    // Transparent
+
+            // Create an image mask from the segmentation map
+            const maskData = new Uint8ClampedArray(canvas.width * canvas.height * 4);
+            for (let i = 0; i < segmentationMap.length; i++) {
+                const classId = segmentationMap[i];
+                const color = (classId === 0) ? roadColor : otherColor;
+                
+                maskData[i * 4 + 0] = color[0];
+                maskData[i * 4 + 1] = color[1];
+                maskData[i * 4 + 2] = color[2];
+                maskData[i * 4 + 3] = color[3];
+            }
+
+            const maskImage = new ImageData(maskData, canvas.width, canvas.height);
+            
+            // --- Draw to Canvas ---
+            // 1. Draw the original video frame
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            
+            // 2. Overlay the segmentation mask
+            // We use a temporary canvas to draw the mask and then overlay it
+            // This is more efficient than putImageData directly on the main context
+            const maskCanvas = document.createElement('canvas');
+            maskCanvas.width = canvas.width;
+            maskCanvas.height = canvas.height;
+            maskCanvas.getContext('2d').putImageData(maskImage, 0, 0);
+            
+            ctx.drawImage(maskCanvas, 0, 0);
+            
+            // Loop
+            requestAnimationFrame(runSegmentation);
+        }
+
+        // --- Event Listeners ---
+        startButton.addEventListener('click', async () => {
+            if (!model) return;
+            
+            await setupWebcam();
+            
+            if(isWebcamStarted) {
+                statusText.innerText = "Running segmentation...";
+                startButton.style.display = 'none'; // Hide button after starting
+                runSegmentation(); // Start the loop
+            }
+        });
+
+        // Disable button until model is loaded
+        startButton.disabled = true;
+        startButton.classList.add('opacity-50', 'cursor-not-allowed');
+
+        // Start loading the model immediately
+        loadModel();
+
+    </script>
+</body>
+</html>
